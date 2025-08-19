@@ -4,3 +4,4 @@ dist/
 .venv/
 .meteor.json
 .idea/
+meteor
