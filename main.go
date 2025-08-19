@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -46,6 +48,8 @@ var (
 	skipBreakingChange bool
 	FS                 afero.Fs     = afero.NewOsFs()
 	AFS                *afero.Afero = &afero.Afero{Fs: FS}
+	currentCommit      *Commit      // Global reference to current commit state
+	osArgs             []string     // Global reference to command line args
 )
 
 const (
@@ -81,6 +85,9 @@ func init() {
 }
 
 func main() {
+	// Set up signal handling for graceful Ctrl-C handling
+	setupSignalHandling()
+
 	gitPath, err := getGitPath()
 	if err != nil {
 		fail(ErrorString, err)
@@ -101,6 +108,10 @@ func main() {
 	}
 
 	var newCommit Commit
+	// Set global reference for signal handler
+	currentCommit = &newCommit
+	// Store command line args for signal handler
+	osArgs = flag.Args()
 	theme := huh.ThemeCatppuccin()
 	if config.ShowIntro && (isFlagPassed("skip-intro") && !skipIntro) {
 		introForm := huh.NewForm(
@@ -279,7 +290,7 @@ func main() {
 		newCommit.Body = newCommit.Body + buildCoauthorString(newCommit.Coauthors)
 	}
 
-	args := flag.Args()
+	args := osArgs // Use the globally stored args
 
 	var commitFile string
 
@@ -380,6 +391,61 @@ func splashScreen() *huh.Note {
 	return huh.NewNote().
 		Title("meteor").
 		Description("A highly customisable command line tool\nfor writing conventional commit messages")
+}
+
+// handleInterrupt handles SIGINT (Ctrl-C) by showing the git command like commit failures
+func handleInterrupt() {
+	if currentCommit == nil {
+		// If no commit data is available, just exit gracefully
+		fmt.Printf("\n%s\n", color.RedString("Operation cancelled."))
+		os.Exit(1)
+	}
+
+	// Build a commit command from whatever data we have so far
+	// Use empty strings for missing data
+	message := currentCommit.Message
+	body := currentCommit.Body
+	
+	// If message is empty, try to build a basic message from available data
+	if message == "" && currentCommit.Type != "" {
+		if currentCommit.IsBreakingChange {
+			// Format: type(scope)!: or type!:
+			if currentCommit.Scope != "" {
+				message = fmt.Sprintf("%s(%s)!: ", currentCommit.Type, currentCommit.Scope)
+			} else {
+				message = fmt.Sprintf("%s!: ", currentCommit.Type)
+			}
+		} else {
+			// Format: type(scope): or type:
+			if currentCommit.Scope != "" {
+				message = fmt.Sprintf("%s(%s): ", currentCommit.Type, currentCommit.Scope)
+			} else {
+				message = fmt.Sprintf("%s: ", currentCommit.Type)
+			}
+		}
+	}
+
+	_, printableCommitCommand := buildCommitCommand(message, body, osArgs)
+
+	writeToClipboard(printableCommitCommand)
+	fmt.Printf(
+		"\n%s\n\n%s\n%s\n\n",
+		color.RedString("Operation cancelled."),
+		color.YellowString("I've copied the following command to your clipboard, so you can run it again later:"),
+		color.BlueString(printableCommitCommand))
+
+	os.Exit(1)
+}
+
+// setupSignalHandling sets up signal handling for graceful shutdown
+func setupSignalHandling() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	go func() {
+		<-sigChan
+		handleInterrupt()
+	}()
 }
 
 // fail prints an error message and exits with a non-zero exit code
